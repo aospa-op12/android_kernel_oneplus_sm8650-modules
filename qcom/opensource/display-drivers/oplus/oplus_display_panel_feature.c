@@ -8,6 +8,7 @@
 ** Author : Display
 ******************************************************************/
 #include <drm/drm_mipi_dsi.h>
+#include <video/mipi_display.h>
 #include "dsi_parser.h"
 #include "dsi_display.h"
 #include "dsi_panel.h"
@@ -545,6 +546,59 @@ u32 oplus_panel_silence_backlight(struct dsi_panel *panel, u32 bl_lvl)
 	return bl_temp;
 }
 
+/* Async 0x51 only for A0005 cmd-mode panels with Pixelworks disabled.
+ * A sync DCS write blocks in dsi_ctrl_dma_cmd_wait_for_done() until the
+ * command DMA completes, which on a cmd-mode link can stall most of a
+ * frame and block the backlight writer. Queueing the wait with
+ * MIPI_DSI_MSG_ASYNC_OVERRIDE defers completion to the controller
+ * workqueue; the next transfer flushes it, preserving order.
+ * Payload byte order intentionally matches mipi_dsi_dcs_set_display_brightness()
+ * ({V & 0xff, V >> 8}) so the on-wire value is unchanged. */
+static bool oplus_panel_use_async_backlight(struct dsi_panel *panel)
+{
+	if (!panel || !panel->oplus_priv.vendor_name)
+		return false;
+	if (strcmp(panel->oplus_priv.vendor_name, "A0005"))
+		return false;
+	if (panel->panel_mode != DSI_OP_CMD_MODE)
+		return false;
+#if defined(CONFIG_PXLW_IRIS)
+	if (iris_is_chip_supported())
+		return false;
+#endif
+	return true;
+}
+
+static int oplus_panel_set_display_brightness(struct dsi_panel *panel,
+		struct mipi_dsi_device *dsi, u16 brightness)
+{
+	u8 tx[3];
+	struct mipi_dsi_msg msg;
+	ssize_t err;
+
+	if (!oplus_panel_use_async_backlight(panel))
+		return mipi_dsi_dcs_set_display_brightness(dsi, brightness);
+	if (!dsi || !dsi->host || !dsi->host->ops || !dsi->host->ops->transfer)
+		return mipi_dsi_dcs_set_display_brightness(dsi, brightness);
+
+	tx[0] = MIPI_DCS_SET_DISPLAY_BRIGHTNESS;
+	tx[1] = brightness & 0xff;
+	tx[2] = brightness >> 8;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.channel = dsi->channel;
+	msg.type = MIPI_DSI_DCS_LONG_WRITE;
+	msg.tx_buf = tx;
+	msg.tx_len = sizeof(tx);
+	msg.flags = MIPI_DSI_MSG_ASYNC_OVERRIDE;
+	if (dsi->mode_flags & MIPI_DSI_MODE_LPM)
+		msg.flags |= MIPI_DSI_MSG_USE_LPM;
+
+	err = dsi->host->ops->transfer(dsi->host, &msg);
+
+	return err < 0 ? (int)err : 0;
+}
+
 void oplus_panel_update_backlight(struct dsi_panel *panel,
 		struct mipi_dsi_device *dsi, u32 bl_lvl)
 {
@@ -659,7 +713,7 @@ void oplus_panel_update_backlight(struct dsi_panel *panel,
 			rc = iris_update_backlight(inverted_dbv_bl_lvl);
 		else
 #endif
-			rc = mipi_dsi_dcs_set_display_brightness(dsi, inverted_dbv_bl_lvl);
+			rc = oplus_panel_set_display_brightness(panel, dsi, (u16)inverted_dbv_bl_lvl);
 
 		mutex_unlock(&panel->panel_tx_lock);
 		if (rc < 0)
