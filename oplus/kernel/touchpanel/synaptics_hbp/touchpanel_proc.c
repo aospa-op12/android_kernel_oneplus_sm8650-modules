@@ -952,7 +952,7 @@ static ssize_t proc_fingerprint_active_read(struct file *file, char __user *buff
 		return count;
 	}
 
-	TPD_INFO("%s: fp_active = %d.\n", __func__, tcm->fp_active);
+	TPD_DEBUG("%s: fp_active = %d.\n", __func__, tcm->fp_active);
 	snprintf(page, PAGESIZE - 1, "%d", tcm->fp_active);
 	ret = simple_read_from_buffer(buffer, count, ppos, page, strlen(page));
 
